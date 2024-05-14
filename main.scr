@@ -1,0 +1,30 @@
+# Assuming that the alignment, assembly steps are done.
+tsv_file = "path/to/tsv_file.tsv"
+reference_genome = "path/to/reference_genome.fasta"
+sample_seq = "path/to/sample_seq.fasta"
+import PairFlank
+import FullSeq
+import TermFind
+import Annotation
+if __name__ == '__main__':
+
+    contig_dict = get_contig_info(bam_path)
+    TermFind.softclip_parser = SoftclipParser(pysam.AlignmentFile(bam_path, 'rb'))
+    TermFind.softclip_parser.parse_softclips()
+    TermFind.softclip_parser.filter_softclips_minlength()
+    TermFind.softclip_parser.filter_softclips_mincount()
+    TermFind.softclip_parser.make_consensus_sequences(contig_dict)
+    TermFind.softclip_parser.filter_consensus_sequences_minlength()
+    TermFind.softclip_parser.filter_consensus_sequences_mincount()
+    TermFind.softclip_parser.make_dataframe()  # Outputs a tsv file
+
+    final_pairs = PairFlank.pair(tsv_file, reference_genome)
+    insrt_seqs = FullSeq.fullseq(final_pairs, sample_seq)
+    email = "example@email.com"  # Provide a valid email address
+    annotation = Annotation(email, insrt_seqs)
+    accession_numbers = annotation.perform_blast_search()
+    gene_info = annotation.get_gene_info(accession_numbers)
+    annotation.save_to_csv(gene_info)
+    print("Gene information saved to gene_info.csv")
+
+####################################################	
