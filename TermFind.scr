@@ -1,0 +1,421 @@
+import softclip_charc
+from collections import defaultdict
+import pysam # a tool for manipulating bam files
+import pandas as pd 
+import numpy as np
+bam_path = "/home/abdelrahman/Pythonprojectsamples/test.bam"
+def get_contig_info(bam_file_path):
+    contig_dict = {}
+
+    with pysam.AlignmentFile(bam_file_path, "rb") as bam_file:
+        for contig in bam_file.header['SQ']:
+            contig_name = contig['SN']
+            contig_length = contig['LN']
+            contig_sequence = bam_file.fetch(contig_name)  # Fetch the sequence for that contig
+
+            contig_dict[contig_name] = {'length': contig_length, 'sequence': contig_sequence}
+
+    return contig_dict
+
+
+
+class SoftclipParser:
+
+    softclipped_sites = None
+    bam = None
+    contig_lengths = None
+
+    min_alignment_quality = None
+    min_alignment_inner_length = None
+    min_softclip_length = None
+    min_softclip_count = None
+    min_count_consensus = None
+
+
+    def __init__(self, bam, min_alignment_quality=20, min_alignment_inner_length=21,
+                 min_softclip_length=8, min_softclip_count=2,  min_count_consensus=2):
+
+        self.bam = bam
+        # self.contig_lengths = get_bam_contig_dict(bam)
+        # A softclipped_sites is a dict with a defaultdict of softclipsite 
+        # Each key inside softclipped_sites (contig) has a value of a SoftclipSite dict 
+        # Inside each SoftclipSite dict a key (=pos) and a value of SoftclipSite object
+        self.softclipped_sites = defaultdict(lambda: defaultdict(SoftclipSite)) 
+        self.min_alignment_quality = min_alignment_quality
+        self.min_alignment_inner_length = min_alignment_inner_length
+        self.min_softclip_length = min_softclip_length
+        self.min_softclip_count = min_softclip_count
+        self.min_count_consensus = min_count_consensus
+
+    # Adds the soft clipped reads to dicts 
+    def parse_softclips(self):
+        read_count = 0
+        for read in self.bam: # loops over the reads in of the bam file 
+
+            read_count += 1 # counting the reads 
+
+            if not self.passes_read_filters(read): # checks if passes read filters (min mapping quality and min alignment inner length)
+               
+                continue
+            # checks if it meets the min softclipp length then gets its position and adds the read to the softclip_5p_reads dict
+            if softclip_charc.is_right_softclipped_lenient(read):
+                self.parse_right_softclipped_read(read) 
+            if softclip_charc.is_left_softclipped_lenient(read): # same here but for the left softclipped ends 
+                self.parse_left_softclipped_read(read)
+
+
+    def filter_softclips_minlength(self):
+        # SoftclipSite is a class has many boolean attributes 
+        filtered_softclipped_sites = defaultdict(lambda: defaultdict(SoftclipSite))
+
+        # loop over the contigs (which is softclipped_sites dict keys)
+        for contig in self.softclipped_sites:
+        # loop over the pos inside the contigs (which is the key inside each SoftclipSite dict which is the value of the contigs keys)
+            for pos in self.softclipped_sites[contig]: 
+
+                 # if not meets_minlebgth_5p = true 
+                if not self.softclipped_sites[contig][pos].meets_minlength_5p:
+                    # set the boolaen value to the attribute keep_softclips_5p of SoftclipSite to false 
+                    self.softclipped_sites[contig][pos].keep_softclips_5p = False 
+
+                if not self.softclipped_sites[contig][pos].meets_minlength_3p: # same here but for the
+                    self.softclipped_sites[contig][pos].keep_softclips_3p = False
+                    
+                # if any of the 3p or 5p has its keep_siftclips value = true, update the filtered_softclipped_sites
+                if self.softclipped_sites[contig][pos].keep_softclips_5p or \
+                    self.softclipped_sites[contig][pos].keep_softclips_3p: 
+                    filtered_softclipped_sites[contig][pos] = self.softclipped_sites[contig][pos]
+
+        self.softclipped_sites = filtered_softclipped_sites
+        
+
+    
+    def filter_softclips_mincount(self):
+        filtered_softclipped_sites = defaultdict(lambda: defaultdict(SoftclipSite))
+
+        for contig in self.softclipped_sites:
+            for pos in self.softclipped_sites[contig]:
+                softclip_site = self.softclipped_sites[contig][pos] 
+                # check the number of softclips suporrting it = 4
+                if softclip_site.get_softclip_5p_count() < self.min_softclip_count: 
+                    # set keep_softclips_5p to false 
+                    softclip_site.keep_softclips_5p = False 
+
+                if softclip_site.get_softclip_3p_count() < self.min_softclip_count: # same for 3p
+                    softclip_site.keep_softclips_3p = False
+
+                # if any passed the criteria, add to filtered_softclipped_sites
+                if softclip_site.keep_softclips_5p or softclip_site.keep_softclips_3p: 
+                    filtered_softclipped_sites[contig][pos] = softclip_site
+
+        self.softclipped_sites = filtered_softclipped_sites # update softclipped_sites with the filtered ones 
+
+
+    # filtering consensus sequences by a minimum length of 4
+    def filter_consensus_sequences_minlength(self):
+        filtered_softclipped_sites = defaultdict(lambda: defaultdict(SoftclipSite))
+        for contig in self.softclipped_sites:
+            for pos in self.softclipped_sites[contig]:
+                softclip_site = self.softclipped_sites[contig][pos]
+
+                if softclip_site.keep_softclips_5p:
+                    # Initialize an empty list to store the consensus_seqs
+                    consensus_seqs = []
+                    # Loop over consensus_sequences_5p list
+                    for consensus in softclip_site.consensus_sequences_5p:
+                        # If the length >= min_softclip_length
+                        if len(consensus[1]) >= self.min_softclip_length:
+                            consensus_seqs.append(consensus)  # Append in the empty list
+                    # Update the softclip_site.consensus_sequences_5p
+                    softclip_site.consensus_sequences_5p = consensus_seqs
+                    if len(consensus_seqs) == 0:  # If the list is empty
+                        softclip_site.keep_softclips_5p = False  # Set keep_softclips_5p to false
+
+                if softclip_site.keep_softclips_3p:  # Same for 3p
+                    consensus_seqs = []
+                    for consensus in softclip_site.consensus_sequences_3p:
+                        if len(consensus[1]) >= self.min_softclip_length:
+                            consensus_seqs.append(consensus)
+
+                    softclip_site.consensus_sequences_3p = consensus_seqs
+                    if len(consensus_seqs) == 0:
+                        softclip_site.keep_softclips_3p = False
+
+                if softclip_site.keep_softclips_5p or softclip_site.keep_softclips_3p:
+                    filtered_softclipped_sites[contig][pos] = softclip_site      
+        self.softclipped_sites = filtered_softclipped_sites
+        
+
+    def filter_consensus_sequences_mincount(self):
+
+        filtered_softclipped_sites = defaultdict(lambda: defaultdict(SoftclipSite))
+
+        for contig in self.softclipped_sites:
+            for pos in self.softclipped_sites[contig]:
+                softclip_site = self.softclipped_sites[contig][pos]
+
+                if softclip_site.keep_softclips_5p:
+
+                    consensus_seqs = []
+                    for consensus in softclip_site.consensus_sequences_5p:
+
+                        if consensus[0] >= self.min_softclip_count:
+                            consensus_seqs.append(consensus)
+                    softclip_site.consensus_sequences_5p = consensus_seqs
+                    if len(consensus_seqs) == 0:
+                        softclip_site.keep_softclips_5p = False
+        
+                if softclip_site.keep_softclips_3p:
+
+                    consensus_seqs = []
+                    for consensus in softclip_site.consensus_sequences_3p:
+
+                        if consensus[0] >= self.min_softclip_count:
+                            consensus_seqs.append(consensus)
+                    softclip_site.consensus_sequences_3p = consensus_seqs
+                    if len(consensus_seqs) == 0:
+                        softclip_site.keep_softclips_3p = False
+
+                if softclip_site.keep_softclips_5p or softclip_site.keep_softclips_3p:
+                    filtered_softclipped_sites[contig][pos] = softclip_site
+        self.softclipped_sites = filtered_softclipped_sites
+
+
+
+    # Filter the consensus seq in each pos by checking if the list is not empty and then get the best consensus seq
+    def filter_multiple_consensus_sequences(self):
+        for contig in self.softclipped_sites:
+            for pos in self.softclipped_sites[contig]:
+                softclip_site = self.softclipped_sites[contig][pos]
+
+                if len(softclip_site.consensus_sequences_5p) > 1: # check if the list is empty 
+                    best_consensus = self.get_best_consensus_sequence(softclip_site.consensus_sequences_5p)
+                    softclip_site.consensus_sequences_5p = best_consensus
+
+                if len(softclip_site.consensus_sequences_3p) > 1:
+                    best_consensus = self.get_best_consensus_sequence(softclip_site.consensus_sequences_3p)
+                    softclip_site.consensus_sequences_3p = best_consensus
+
+             
+    # Select the best consnesus seq based on the number of occurances and len of the seq
+    def get_best_consensus_sequence(self, consensus_seqs):
+    # sorting the consensus sequences based on count and length
+        sorted_consensus_seqs = sorted(consensus_seqs, key=lambda x: (x[0], len(x[1]))) 
+    #  the last is best consensus sequence from the sorted list as it sorted ascendingly 
+        best_consensus_sequence = sorted_consensus_seqs[-1]
+    # Convert the result back to a list
+        best_consensus_sequence_list = [best_consensus_sequence]
+        return best_consensus_sequence_list
+
+
+    def get_reads_at_site(self, contig, pos):
+
+        reads = []
+
+        start = pos - 1
+        end = pos + 2
+
+        if start < 0:
+            start = 0
+        if end > self.contig_lengths[contig]:
+            end = self.contig_lengths[contig]
+
+        for read in self.bam.fetch(contig, start, end):
+            if self.passes_read_filters(read):
+                reads.append(read)
+
+        return reads
+    
+    def make_consensus_sequences(self, contig_dict):
+
+        for contig in self.softclipped_sites:
+            for pos in self.softclipped_sites[contig]:
+                site = self.softclipped_sites[contig][pos]
+
+                if site.keep_softclips_5p:
+                    for read_sequence in site.softclip_5p_reads:
+                        SoftclipSite.consensus_sequences_5p.append(read_sequence)
+
+                if site.keep_softclips_3p:
+                    for read_sequence in site.softclip_3p_reads:
+                        SoftclipSite.consensus_sequences_3p.append(read_sequence)
+
+
+    def get_softclip_5p_positions(self):
+        positions = defaultdict(list)
+
+        for contig in self.softclipped_sites:
+            for pos in self.softclipped_sites[contig]:
+                if self.softclipped_sites[contig][pos].get_softclip_5p_count() > 0:
+                    positions[contig].append(pos)
+
+        for contig in positions:
+            positions[contig] = sorted(positions[contig])
+
+        return positions
+
+
+    def passes_read_filters(self, read):
+        if read.mapping_quality < self.min_alignment_quality:
+            return False
+        else:
+            return True
+
+    def parse_right_softclipped_read(self, read):
+        meets_minlength = self.meets_minlength_right(read)
+        contig, pos = softclip_charc.right_softclipped_site_lenient(read)
+        self.softclipped_sites[contig][pos].add_softclip_5p(read, meets_minlength)
+
+    def parse_left_softclipped_read(self, read):
+        meets_minlength = self.meets_minlength_left(read)
+        contig, pos = softclip_charc.left_softclipped_site_lenient(read)
+        self.softclipped_sites[contig][pos].add_softclip_3p(read, meets_minlength)
+
+    def meets_minlength_right(self, read):
+        meets_minlength = False
+        if softclip_charc.right_softclip_length(read) >= self.min_softclip_length:
+            meets_minlength = True
+        return meets_minlength
+
+    def meets_minlength_left(self, read):
+        meets_minlength = False
+        if softclip_charc.left_softclip_length(read) >= self.min_softclip_length:
+            meets_minlength = True
+        return meets_minlength
+
+
+    def count_softclips(self):
+        count = 0
+        for contig in self.softclipped_sites:
+            count += len(self.softclipped_sites[contig])
+        return count
+
+    def count_consensus_seqs(self):
+        count = 0
+        for contig in self.softclipped_sites:
+            for pos in self.softclipped_sites[contig]:
+                count += len(self.softclipped_sites[contig][pos].consensus_sequences_5p)
+                count += len(self.softclipped_sites[contig][pos].consensus_sequences_3p)
+        return count
+
+    def make_dataframe(self):
+
+        column_names = ['contig', 'pos', 'orient', 'softclip_count_5p', 'softclip_count_3p', 'runthrough_count',
+                        'total_count', 'consensus_softclip_count', 'consensus_seq']
+
+        outdata = dict()
+        for contig in self.softclipped_sites:
+            sorted_positions = sorted(list(self.softclipped_sites[contig].keys()))
+
+            for pos in sorted_positions:
+                site = self.softclipped_sites[contig][pos]
+
+                if site.keep_softclips_5p:
+                    for consensus_sequence in site.get_consensus_sequences('5p'):
+                        outdata[len(outdata)] = [
+                            contig, pos, '5p', site.get_softclip_5p_count(), site.get_softclip_3p_count(),
+                            site.get_runthrough_count(),
+                            site.get_total_count(), consensus_sequence[0], consensus_sequence[1]
+                        ]
+
+                if site.keep_softclips_3p:
+                    for consensus_sequence in site.get_consensus_sequences('3p'):
+                        outdata[len(outdata)] = [
+                            contig, pos, '3p', site.get_softclip_5p_count(), site.get_softclip_3p_count(),
+                            site.get_runthrough_count(), consensus_sequence[0], consensus_sequence[1]
+                        ]
+
+        out_df = pd.DataFrame.from_dict(outdata, orient='index', columns=column_names)
+        tsv_filename = "Finally_an_output.tsv"
+        out_df.to_csv(tsv_filename, sep='\t', index=False)
+        return out_df
+
+    
+class SoftclipSite:
+
+    softclip_5p_reads = None
+    softclip_3p_reads = None
+
+    meets_minlength_5p = None
+    meets_minlength_3p = None
+
+    insertion_5p_reads = None
+    insertion_3p_reads = None
+    runthrough_reads = None
+
+
+    keep_softclips_5p = None
+    keep_softclips_3p = None
+
+    consensus_sequences_5p = []
+    consensus_sequences_3p = []
+
+    def __init__(self):
+        self.softclip_5p_reads = defaultdict(set)
+        self.softclip_3p_reads = defaultdict(set)
+
+        self.meets_minlength_5p = False
+        self.meets_minlength_3p = False
+
+    
+        self.runthrough_reads = set()
+
+
+        self.keep_softclips_5p = True
+        self.keep_softclips_3p = True
+
+        self.consensus_sequences_5p = []
+        self.consensus_sequences_3p = []
+        
+
+
+    def add_softclip_5p(self, read, meets_minlength):
+        self.softclip_5p_reads[read.query_name].add(read)
+
+        if not self.meets_minlength_5p and meets_minlength:
+            self.meets_minlength_5p = True
+
+
+    def add_softclip_3p(self, read, meets_minlength):
+        self.softclip_3p_reads[read.query_name].add(read)
+
+        if not self.meets_minlength_3p and meets_minlength:
+            self.meets_minlength_3p = True
+
+    def add_runthrough(self, read):
+        self.runthrough_reads.add(read.query_name)
+
+
+
+    def get_total_count(self):
+
+        total_count = self.get_softclip_5p_count() + self.get_softclip_3p_count() + self.get_runthrough_count()
+        return total_count
+
+    def get_softclip_5p_count(self):
+        return len(self.softclip_5p_reads)
+
+    def get_softclip_3p_count(self):
+        return len(self.softclip_3p_reads)
+
+    def get_runthrough_count(self):
+        return len(self.runthrough_reads)
+    
+    def get_consensus_sequences(self, orientation):
+        if orientation == '5p':
+            return self.consensus_sequences_5p
+        elif orientation == '3p':
+            return self.consensus_sequences_3p
+        else:
+            return []
+
+if __name__ == '__main__':
+    contig_dict = get_contig_info(bam_path) 
+    softclip_parser = SoftclipParser(pysam.AlignmentFile(bam_path, 'rb'))
+    softclip_parser.parse_softclips()
+    softclip_parser.filter_softclips_minlength()
+    softclip_parser.filter_softclips_mincount()
+    softclip_parser.make_consensus_sequences(contig_dict)
+    softclip_parser.filter_consensus_sequences_minlength()
+    softclip_parser.filter_consensus_sequences_mincount()
+    softclip_parser.make_dataframe()
