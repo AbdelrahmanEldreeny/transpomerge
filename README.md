@@ -1,4 +1,8 @@
 # TranspoMerge
+## Authors
+Abdelrahman Eldreeny 
+Omar Loay 
+Sama El-Taher 
 
 ## Tool Description
 TranspoMerge is used to detect transposable elements in bacterial genomes by identifying the direct repeats characteristic of these elements. The direct repeats are identified by aligning the short paired-end reads of the bacterial sample with a reference genome and collecting the soft-clipped reads as candidate termini. These termini are paired together and filtered based on orientation, position, length, and count. The termini are then used to retrieve the entire mobile genetic element sequence from the sample’s assembled genome, which is subsequently annotated.
